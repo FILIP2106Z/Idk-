@@ -23,8 +23,10 @@ import com.example.model.AudioRouteState
 import com.example.model.BluetoothProfileType
 import com.example.model.DspConfig
 import com.example.model.EngineTelemetry
+import com.example.model.HardwareSpecificationReport
 import com.example.model.LoopbackMeasurement
 import com.example.model.LoopbackTestPhase
+import com.example.model.MicrophoneOption
 import com.example.model.TransmissionStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,9 +56,17 @@ object AudioSessionHub {
     private val _loopbackMeasurement = MutableStateFlow(LoopbackMeasurement())
     val loopbackMeasurement: StateFlow<LoopbackMeasurement> = _loopbackMeasurement.asStateFlow()
 
+    private val _microphones = MutableStateFlow<List<MicrophoneOption>>(emptyList())
+    val microphones: StateFlow<List<MicrophoneOption>> = _microphones.asStateFlow()
+
+    private val _hardwareReport = MutableStateFlow(HardwareSpecificationReport())
+    val hardwareReport: StateFlow<HardwareSpecificationReport> = _hardwareReport.asStateFlow()
+
     private val _lastErrorMessagePl = MutableStateFlow<String?>(null)
     val lastErrorMessagePl: StateFlow<String?> = _lastErrorMessagePl.asStateFlow()
 
+    @Volatile
+    internal var latestDspConfig: DspConfig = DspConfig()
     internal var activeService: AudioTransmissionService? = null
 
     fun updateStatus(status: TransmissionStatus, errorPl: String? = null) {
@@ -76,17 +86,34 @@ object AudioSessionHub {
         _loopbackMeasurement.value = value
     }
 
+    fun updateMicrophones(list: List<MicrophoneOption>) {
+        _microphones.value = list
+    }
+
+    fun updateHardwareReport(report: HardwareSpecificationReport) {
+        _hardwareReport.value = report
+    }
+
     fun selectDevice(device: AudioOutputDevice) {
         activeService?.routeManager?.selectDevice(device)
     }
 
     fun refreshDevices() {
         activeService?.routeManager?.refreshDevices()
+        activeService?.refreshHardwareSpec()
+    }
+
+    fun refreshHardwareReport() {
+        activeService?.refreshHardwareSpec()
     }
 
     fun applyDspConfig(config: DspConfig) {
+        latestDspConfig = config
         NativeAudioBridge.updateDspConfig(config)
-        activeService?.currentDspConfig = config
+        val service = activeService
+        if (service != null) {
+            service.applyUpdatedConfig(config)
+        }
     }
 
     fun triggerLoopbackTest() {
@@ -141,6 +168,7 @@ class AudioTransmissionService : Service() {
     private var audioFocusRequest: AudioFocusRequest? = null
     private lateinit var audioManager: AudioManager
     private lateinit var diagnosticsMonitor: SystemDiagnosticsMonitor
+    private lateinit var hardwareInspector: HardwareInspector
 
     internal lateinit var routeManager: BluetoothRouteManager
     internal var currentDspConfig: DspConfig = DspConfig()
@@ -177,8 +205,11 @@ class AudioTransmissionService : Service() {
     override fun onCreate() {
         super.onCreate()
         AudioSessionHub.activeService = this
+        currentDspConfig = AudioSessionHub.latestDspConfig
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         diagnosticsMonitor = SystemDiagnosticsMonitor(this)
+        hardwareInspector = HardwareInspector(this)
+        hardwareInspector.registerProfileProxy()
         createNotificationChannel()
 
         routeManager = BluetoothRouteManager(
@@ -195,10 +226,12 @@ class AudioTransmissionService : Service() {
             },
         )
         routeManager.startMonitoring()
+        refreshHardwareSpec()
 
         serviceScope.launch {
             routeManager.routeState.collect { state ->
                 AudioSessionHub.updateRouteState(state)
+                refreshHardwareSpec()
                 if (isTransmitting) {
                     updateForegroundNotification()
                 }
@@ -210,7 +243,10 @@ class AudioTransmissionService : Service() {
         when (intent?.action) {
             ACTION_START -> beginStreaming()
             ACTION_STOP -> stopStreamingImmediately()
-            ACTION_SYNC_IDLE -> routeManager.refreshDevices()
+            ACTION_SYNC_IDLE -> {
+                routeManager.refreshDevices()
+                refreshHardwareSpec()
+            }
         }
         return START_NOT_STICKY
     }
@@ -220,6 +256,7 @@ class AudioTransmissionService : Service() {
     override fun onDestroy() {
         stopStreamingImmediately()
         routeManager.stopMonitoring()
+        hardwareInspector.unregisterProfileProxy()
         if (AudioSessionHub.activeService === this) {
             AudioSessionHub.activeService = null
         }
@@ -259,15 +296,7 @@ class AudioTransmissionService : Service() {
         acquireWakeLock()
 
         routeManager.setTransmissionState(true)
-        val isA2dp = selectedDevice.profileType == BluetoothProfileType.A2DP
-        val micId = routeManager.findBuiltInMicDeviceId()
-
-        NativeAudioBridge.updateDspConfig(currentDspConfig)
-        val started = NativeAudioBridge.start(
-            inputDeviceId = micId,
-            outputDeviceId = selectedDevice.id,
-            isA2dpMode = isA2dp,
-        )
+        val started = startNativeEngineForDevice(selectedDevice, currentDspConfig)
 
         if (!started) {
             routeManager.setTransmissionState(false)
@@ -288,6 +317,7 @@ class AudioTransmissionService : Service() {
         diagnosticsMonitor.resetSessionBaseline()
 
         AudioSessionHub.updateStatus(TransmissionStatus.ACTIVE)
+        refreshHardwareSpec()
         startTelemetryLoop()
     }
 
@@ -310,6 +340,7 @@ class AudioTransmissionService : Service() {
                 batteryPercent = diagnosticsMonitor.readBatteryPercent(),
             ),
         )
+        refreshHardwareSpec()
     }
 
     private fun handleBluetoothDisconnect() {
@@ -319,30 +350,90 @@ class AudioTransmissionService : Service() {
         NativeAudioBridge.stop()
         AudioSessionHub.updateStatus(TransmissionStatus.RECONNECTING)
         updateForegroundNotification()
+        refreshHardwareSpec()
     }
 
     private fun handleBluetoothReconnect(device: AudioOutputDevice) {
         if (!isTransmitting) return
         pausedByDisconnect = false
-        val isA2dp = device.profileType == BluetoothProfileType.A2DP
-        val micId = routeManager.findBuiltInMicDeviceId()
-        val restarted = NativeAudioBridge.start(
-            inputDeviceId = micId,
-            outputDeviceId = device.id,
-            isA2dpMode = isA2dp,
-        )
+        val restarted = startNativeEngineForDevice(device, currentDspConfig)
         if (restarted) {
             NativeAudioBridge.setMuted(pausedByFocusLoss)
             AudioSessionHub.updateStatus(
                 if (pausedByFocusLoss) TransmissionStatus.PAUSED_CALL_OR_FOCUS else TransmissionStatus.ACTIVE,
             )
             updateForegroundNotification()
+            refreshHardwareSpec()
         } else {
             AudioSessionHub.updateStatus(
                 TransmissionStatus.ERROR,
                 "Słuchawki połączyły się ponownie, ale restart strumienia audio nie powiódł się.",
             )
         }
+    }
+
+    internal fun applyUpdatedConfig(newConfig: DspConfig) {
+        val prev = currentDspConfig
+        currentDspConfig = newConfig
+        val needsEngineRestart = prev.selectedMicDeviceId != newConfig.selectedMicDeviceId ||
+            prev.micInputPreset != newConfig.micInputPreset ||
+            prev.latencyProfile != newConfig.latencyProfile ||
+            prev.a2dpUsagePreference != newConfig.a2dpUsagePreference
+
+        if (needsEngineRestart && isTransmitting && !pausedByDisconnect) {
+            val selected = routeManager.routeState.value.selectedDevice
+            if (selected != null) {
+                NativeAudioBridge.stop()
+                routeManager.applyRoutingToDevice(selected)
+                val restarted = startNativeEngineForDevice(selected, newConfig)
+                if (restarted) {
+                    NativeAudioBridge.setMuted(pausedByFocusLoss)
+                } else {
+                    AudioSessionHub.updateStatus(
+                        TransmissionStatus.ERROR,
+                        "Nie udało się zrestartować strumienia po zmianie mikrofonu lub trybu opóźnienia.",
+                    )
+                }
+            }
+        }
+        if (needsEngineRestart) {
+            refreshHardwareSpec()
+        }
+    }
+
+    internal fun refreshHardwareSpec() {
+        if (!::hardwareInspector.isInitialized) return
+        val mics = hardwareInspector.enumerateMicrophones()
+        AudioSessionHub.updateMicrophones(mics)
+        val report = hardwareInspector.collectFullSpecification(
+            routeState = routeManager.routeState.value,
+            telemetry = AudioSessionHub.telemetry.value,
+            loopback = AudioSessionHub.loopbackMeasurement.value,
+            dspConfig = currentDspConfig,
+            microphones = mics,
+        )
+        AudioSessionHub.updateHardwareReport(report)
+    }
+
+    private fun startNativeEngineForDevice(device: AudioOutputDevice, config: DspConfig): Boolean {
+        val micId = if (config.selectedMicDeviceId > 0) {
+            config.selectedMicDeviceId
+        } else {
+            routeManager.findBuiltInMicDeviceId()
+        }
+        val usageMode = if (device.profileType == BluetoothProfileType.A2DP) {
+            config.a2dpUsagePreference.nativeUsageCode
+        } else {
+            0
+        }
+        NativeAudioBridge.updateDspConfig(config)
+        return NativeAudioBridge.start(
+            inputDeviceId = micId,
+            outputDeviceId = device.id,
+            usageMode = usageMode,
+            inputPresetMode = config.micInputPreset.nativeCode,
+            ultraLowLatencyMode = config.latencyProfile.isUltraLow,
+        )
     }
 
     internal fun startLoopbackMeasurement() {
@@ -412,6 +503,7 @@ class AudioTransmissionService : Service() {
     private fun startTelemetryLoop() {
         telemetryJob?.cancel()
         telemetryJob = serviceScope.launch {
+            var tickCount = 0
             while (isActive && isTransmitting) {
                 val nativeSnap = NativeAudioBridge.getTelemetry()
 
@@ -421,11 +513,7 @@ class AudioTransmissionService : Service() {
                     if (selected != null) {
                         NativeAudioBridge.stop()
                         routeManager.applyRoutingToDevice(selected)
-                        NativeAudioBridge.start(
-                            inputDeviceId = routeManager.findBuiltInMicDeviceId(),
-                            outputDeviceId = selected.id,
-                            isA2dpMode = selected.profileType == BluetoothProfileType.A2DP,
-                        )
+                        startNativeEngineForDevice(selected, currentDspConfig)
                     }
                 }
 
@@ -438,6 +526,10 @@ class AudioTransmissionService : Service() {
                 )
                 AudioSessionHub.updateTelemetry(fullTelemetry)
                 routeManager.updateEvaluationContext(fullTelemetry, AudioSessionHub.loopbackMeasurement.value)
+                if (tickCount % 8 == 0) {
+                    refreshHardwareSpec()
+                }
+                tickCount++
                 delay(120L)
             }
         }

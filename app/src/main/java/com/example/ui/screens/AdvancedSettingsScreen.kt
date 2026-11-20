@@ -32,8 +32,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.model.DspConfig
+import com.example.model.HardwareSpecificationReport
+import com.example.model.LatencyProfile
+import com.example.model.MicInputPreset
+import com.example.model.MicrophoneOption
+import com.example.model.OutputUsagePreference
 import com.example.model.SafetyAndPermissionState
 import com.example.model.ThemeMode
+import com.example.ui.components.HardwareSpecificationCard
+import com.example.ui.components.LowLatencyAndMicCard
 import com.example.ui.components.PermissionChecklistCard
 import kotlin.math.roundToInt
 
@@ -42,6 +49,13 @@ fun AdvancedSettingsScreen(
     dspConfig: DspConfig,
     themeMode: ThemeMode,
     safetyState: SafetyAndPermissionState,
+    microphones: List<MicrophoneOption> = emptyList(),
+    hardwareReport: HardwareSpecificationReport = HardwareSpecificationReport(),
+    onSelectMicrophone: (Int) -> Unit = {},
+    onSelectMicInputPreset: (MicInputPreset) -> Unit = {},
+    onSelectLatencyProfile: (LatencyProfile) -> Unit = {},
+    onSelectA2dpUsagePreference: (OutputUsagePreference) -> Unit = {},
+    onRefreshHardwareReport: () -> Unit = {},
     onUpdateMaxOutputLimit: (Float) -> Unit,
     onUpdateSoftStartRamp: (Float) -> Unit,
     onUpdateHighPass: (Boolean, Float) -> Unit,
@@ -68,6 +82,14 @@ fun AdvancedSettingsScreen(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            LowLatencyAndMicCard(
+                dspConfig = dspConfig,
+                microphones = microphones,
+                onSelectLatencyProfile = onSelectLatencyProfile,
+                onSelectMicrophone = onSelectMicrophone,
+                onSelectMicInputPreset = onSelectMicInputPreset,
+                onSelectA2dpUsagePreference = onSelectA2dpUsagePreference,
+            )
             // Patient Hearing Safety Limits
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -261,6 +283,11 @@ fun AdvancedSettingsScreen(
                     }
                 }
             }
+
+            HardwareSpecificationCard(
+                report = hardwareReport,
+                onRefreshReport = onRefreshHardwareReport,
+            )
 
             PermissionChecklistCard(
                 safetyState = safetyState,

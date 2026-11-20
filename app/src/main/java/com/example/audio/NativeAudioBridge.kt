@@ -19,10 +19,21 @@ object NativeAudioBridge {
 
     fun isAvailable(): Boolean = libraryLoaded
 
-    fun start(inputDeviceId: Int, outputDeviceId: Int, isA2dpMode: Boolean): Boolean {
+    fun start(
+        inputDeviceId: Int,
+        outputDeviceId: Int,
+        usageMode: Int,
+        inputPresetMode: Int,
+        ultraLowLatencyMode: Boolean,
+    ): Boolean {
         if (!libraryLoaded) return false
-        val usageMode = if (isA2dpMode) 1 else 0
-        return nativeStart(inputDeviceId, outputDeviceId, usageMode)
+        return nativeStart(
+            inputDeviceId = inputDeviceId,
+            outputDeviceId = outputDeviceId,
+            usageMode = usageMode,
+            inputPresetMode = inputPresetMode,
+            ultraLowLatencyMode = ultraLowLatencyMode,
+        )
     }
 
     fun stop() {
@@ -91,9 +102,9 @@ object NativeAudioBridge {
     fun getTelemetry(): EngineTelemetry {
         if (!libraryLoaded) return EngineTelemetry()
         val arr = nativeGetTelemetry()
-        if (arr.size < 23) return EngineTelemetry()
+        if (arr.size < 30) return EngineTelemetry()
         val running = arr[0] > 0.5f
-        val estLatency = if (running && arr[18] >= 0f) arr[18] else null
+        val estLatency = if (running && arr[23] >= 0f) arr[23] else null
         return EngineTelemetry(
             isRunning = running,
             inputStreamOpen = arr[1] > 0.5f,
@@ -102,26 +113,40 @@ object NativeAudioBridge {
             outputIsAAudio = arr[4] > 0.5f,
             inputIsExclusive = arr[5] > 0.5f,
             outputIsExclusive = arr[6] > 0.5f,
-            sampleRate = arr[7].toInt(),
-            inputFramesPerBurst = arr[8].toInt(),
-            outputFramesPerBurst = arr[9].toInt(),
-            outputBufferSizeFrames = arr[10].toInt(),
-            ringBufferedFrames = arr[11].toInt(),
-            inputXRunCount = arr[12].toLong(),
-            outputXRunCount = arr[13].toLong(),
-            ringOverruns = arr[14].toLong(),
-            ringUnderruns = arr[15].toLong(),
-            dspAvgTimeUs = arr[16],
-            dspMaxTimeUs = arr[17],
+            inputSampleRate = arr[7].toInt(),
+            outputSampleRate = arr[8].toInt(),
+            inputFramesPerBurst = arr[9].toInt(),
+            outputFramesPerBurst = arr[10].toInt(),
+            inputBufferSizeFrames = arr[11].toInt(),
+            outputBufferSizeFrames = arr[12].toInt(),
+            ringBufferedFrames = arr[13].toInt(),
+            inputXRunCount = arr[14].toLong(),
+            outputXRunCount = arr[15].toLong(),
+            ringOverruns = arr[16].toLong(),
+            ringUnderruns = arr[17].toLong(),
+            dspAvgTimeUs = arr[18],
+            dspMaxTimeUs = arr[19],
+            inputBufferLatencyMs = arr[20],
+            ringBufferLatencyMs = arr[21],
+            outputBufferLatencyMs = arr[22],
             estimatedPipelineLatencyMs = estLatency,
-            inputLevelDbfs = arr[19],
-            outputLevelDbfs = arr[20],
-            limiterActive = arr[21] > 0.5f,
-            streamErrorOccurred = arr[22] > 0.5f,
+            inputLevelDbfs = arr[24],
+            outputLevelDbfs = arr[25],
+            limiterActive = arr[26] > 0.5f,
+            streamErrorOccurred = arr[27] > 0.5f,
+            autoGuardBufferMultiplier = arr[28].toInt().coerceAtLeast(1),
+            autoGuardAdjustments = arr[29].toInt().coerceAtLeast(0),
         )
     }
 
-    private external fun nativeStart(inputDeviceId: Int, outputDeviceId: Int, usageMode: Int): Boolean
+    private external fun nativeStart(
+        inputDeviceId: Int,
+        outputDeviceId: Int,
+        usageMode: Int,
+        inputPresetMode: Int,
+        ultraLowLatencyMode: Boolean,
+    ): Boolean
+
     private external fun nativeStop()
     private external fun nativeSetMuted(muted: Boolean)
     private external fun nativeUpdateDspConfig(
@@ -138,6 +163,7 @@ object NativeAudioBridge {
         agcEnabled: Boolean,
         agcTargetDb: Float,
     )
+
     private external fun nativeStartLoopbackTest()
     private external fun nativeCancelLoopbackTest()
     private external fun nativePollLoopbackTest(): FloatArray

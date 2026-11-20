@@ -111,13 +111,62 @@ fun DiagnosticsScreen(
                         },
                     )
                     DiagnosticMetricRow(
-                        label = "2. Opóźnienie buforów potoku Oboe/AAudio",
-                        value = telemetry.estimatedPipelineLatencyMs?.let {
-                            String.format(Locale.US, "%.1f ms (bez kodeka Bluetooth)", it)
-                        } ?: "Niedostępne (strumień zatrzymany)",
+                        label = "2. Bufor wejściowy Oboe (Mikrofon)",
+                        value = if (telemetry.isRunning) {
+                            String.format(
+                                Locale.US,
+                                "%.1f ms (%d kl./burst @ %d Hz)",
+                                telemetry.inputBufferLatencyMs,
+                                telemetry.inputFramesPerBurst,
+                                telemetry.inputSampleRate,
+                            )
+                        } else {
+                            "Nieaktywny"
+                        },
                     )
                     DiagnosticMetricRow(
-                        label = "3. Zmierzone opóźnienie akustyczne end-to-end",
+                        label = "3. Kolejka międzywątkowa SPSC",
+                        value = if (telemetry.isRunning) {
+                            String.format(
+                                Locale.US,
+                                "%.1f ms (%d klatek)",
+                                telemetry.ringBufferLatencyMs,
+                                telemetry.ringBufferedFrames,
+                            )
+                        } else {
+                            "Nieaktywny"
+                        },
+                    )
+                    DiagnosticMetricRow(
+                        label = "4. Bufor wyjściowy Oboe (Audio HAL)",
+                        value = if (telemetry.isRunning) {
+                            String.format(
+                                Locale.US,
+                                "%.1f ms (%d kl. / burst %d @ %d Hz)",
+                                telemetry.outputBufferLatencyMs,
+                                telemetry.outputBufferSizeFrames,
+                                telemetry.outputFramesPerBurst,
+                                telemetry.outputSampleRate,
+                            )
+                        } else {
+                            "Nieaktywny"
+                        },
+                    )
+                    DiagnosticMetricRow(
+                        label = "5. Suma aplikacja + telefon (cel 10–20 ms)",
+                        value = telemetry.estimatedPipelineLatencyMs?.let {
+                            String.format(Locale.US, "%.1f ms (przed radiem Bluetooth)", it)
+                        } ?: "Niedostępne (strumień zatrzymany)",
+                        highlightColor = telemetry.estimatedPipelineLatencyMs?.let { ms ->
+                            when {
+                                ms <= 20f -> semantic.excellent
+                                ms <= 35f -> semantic.warning
+                                else -> semantic.error
+                            }
+                        },
+                    )
+                    DiagnosticMetricRow(
+                        label = "6. Zmierzone opóźnienie z Bluetooth (end-to-end)",
                         value = loopbackMeasurement.measuredEndToEndMs?.let {
                             "${it.roundToInt()} ms (pewność ${(loopbackMeasurement.confidence * 100).roundToInt()}%)"
                         } ?: "Niedostępne — wymaga testu poniżej",
@@ -230,15 +279,24 @@ fun DiagnosticsScreen(
                         },
                     )
                     DiagnosticMetricRow(
-                        label = "Rzeczywista częstotliwość próbkowania",
-                        value = if (telemetry.sampleRate > 0) "${telemetry.sampleRate} Hz (Mono Float32)" else "—",
-                    )
-                    DiagnosticMetricRow(
-                        label = "Rozmiar burst / bufora wyjściowego",
-                        value = if (telemetry.outputFramesPerBurst > 0) {
-                            "${telemetry.outputFramesPerBurst} / ${telemetry.outputBufferSizeFrames} klatek"
+                        label = "Częstotliwość próbkowania (Wej. / Wyj.)",
+                        value = if (telemetry.inputSampleRate > 0 && telemetry.outputSampleRate > 0) {
+                            val resamplerTag = if (telemetry.inputSampleRate == telemetry.outputSampleRate) {
+                                "bez resamplera"
+                            } else {
+                                "resampler liniowy"
+                            }
+                            "${telemetry.inputSampleRate} Hz → ${telemetry.outputSampleRate} Hz ($resamplerTag)"
                         } else {
                             "—"
+                        },
+                    )
+                    DiagnosticMetricRow(
+                        label = "Auto-XRun Guard / Bufor wyjściowy",
+                        value = if (telemetry.outputFramesPerBurst > 0) {
+                            "Mnożnik ${telemetry.autoGuardBufferMultiplier}× (korekt: ${telemetry.autoGuardAdjustments}) · ${telemetry.outputFramesPerBurst}/${telemetry.outputBufferSizeFrames} kl."
+                        } else {
+                            "Mnożnik ${telemetry.autoGuardBufferMultiplier}×"
                         },
                     )
                     DiagnosticMetricRow(

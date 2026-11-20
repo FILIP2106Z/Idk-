@@ -12,7 +12,12 @@ import com.example.model.AudioPreset
 import com.example.model.AudioRouteState
 import com.example.model.DspConfig
 import com.example.model.EngineTelemetry
+import com.example.model.HardwareSpecificationReport
+import com.example.model.LatencyProfile
 import com.example.model.LoopbackMeasurement
+import com.example.model.MicInputPreset
+import com.example.model.MicrophoneOption
+import com.example.model.OutputUsagePreference
 import com.example.model.SafetyAndPermissionState
 import com.example.model.ThemeMode
 import com.example.model.TransmissionStatus
@@ -32,6 +37,8 @@ data class HearLinkUiState(
     val transmissionStatus: TransmissionStatus = TransmissionStatus.STOPPED,
     val telemetry: EngineTelemetry = EngineTelemetry(),
     val loopbackMeasurement: LoopbackMeasurement = LoopbackMeasurement(),
+    val microphones: List<MicrophoneOption> = emptyList(),
+    val hardwareReport: HardwareSpecificationReport = HardwareSpecificationReport(),
     val errorMessagePl: String? = null,
     val showDeviceSheet: Boolean = false,
 ) {
@@ -73,12 +80,20 @@ class HearLinkViewModel(application: Application) : AndroidViewModel(application
         SessionBundle(settings, route, status, telemetry, loopback)
     }
 
+    private val hardwareBundleFlow = combine(
+        AudioSessionHub.microphones,
+        AudioSessionHub.hardwareReport,
+    ) { mics, report ->
+        mics to report
+    }
+
     val uiState: StateFlow<HearLinkUiState> = combine(
         coreSessionFlow,
         safetyAndPermissionsFlow,
+        hardwareBundleFlow,
         AudioSessionHub.lastErrorMessagePl,
         showDeviceSheetFlow,
-    ) { bundle, safety, errorMsg, showSheet ->
+    ) { bundle, safety, hwBundle, errorMsg, showSheet ->
         HearLinkUiState(
             settingsLoaded = true,
             themeMode = bundle.settings.themeMode,
@@ -88,6 +103,8 @@ class HearLinkViewModel(application: Application) : AndroidViewModel(application
             transmissionStatus = bundle.status,
             telemetry = bundle.telemetry,
             loopbackMeasurement = bundle.loopback,
+            microphones = hwBundle.first,
+            hardwareReport = hwBundle.second,
             errorMessagePl = errorMsg,
             showDeviceSheet = showSheet,
         )
@@ -113,6 +130,11 @@ class HearLinkViewModel(application: Application) : AndroidViewModel(application
         permissionRefreshTrigger.value++
         runCatching { AudioTransmissionService.startMonitorOnly(getApplication()) }
         AudioSessionHub.refreshDevices()
+    }
+
+    fun refreshHardwareSpecification() {
+        runCatching { AudioTransmissionService.startMonitorOnly(getApplication()) }
+        AudioSessionHub.refreshHardwareReport()
     }
 
     fun acceptSafetyDisclaimer() {
@@ -173,6 +195,22 @@ class HearLinkViewModel(application: Application) : AndroidViewModel(application
     fun selectPreset(preset: AudioPreset) {
         val updated = DspConfig.forPreset(preset, uiState.value.dspConfig)
         updateDspConfig(updated)
+    }
+
+    fun selectMicrophone(deviceId: Int) {
+        updateDspConfig(uiState.value.dspConfig.copy(selectedMicDeviceId = deviceId))
+    }
+
+    fun selectMicInputPreset(preset: MicInputPreset) {
+        updateDspConfig(uiState.value.dspConfig.copy(micInputPreset = preset))
+    }
+
+    fun selectLatencyProfile(profile: LatencyProfile) {
+        updateDspConfig(uiState.value.dspConfig.copy(latencyProfile = profile))
+    }
+
+    fun selectA2dpUsagePreference(preference: OutputUsagePreference) {
+        updateDspConfig(uiState.value.dspConfig.copy(a2dpUsagePreference = preference))
     }
 
     fun updateMicSensitivity(db: Float) {

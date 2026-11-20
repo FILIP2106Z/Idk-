@@ -5,8 +5,14 @@ Format jest oparty na [Keep a Changelog](https://keepachangelog.com/pl/1.1.0/), 
 
 ## [Unreleased]
 
-### Planowane / W przygotowaniu
-- Walidacja terenowa opóźnień dla kolejnych modeli słuchawek z przewodnictwem kostnym.
+### Dodano
+- **Tryb Ultra-Niski (cel 10–20 ms po stronie telefonu) i Auto-XRun Guard**: start wyjścia Oboe od `1× burst`, natychmiastowa synchronizacja pierścienia SPSC przy pierwszym wywołaniu zwrotnym (*zero-lag startup sync*), otwieranie strumieni w natywnym próbkowaniu sprzętu (bez wymuszonego resamplingu AudioFlinger) z lekkim resamplerem liniowym C++ tylko przy różnicy `inSR != outSR` oraz automatyczne podbijanie bufora (`+1×` do `4×`), jeśli wystąpią ≥ 3 underruny w oknie 2 s.
+- **Wybór fizycznego mikrofonu i presetu HAL (`InputPreset`)**: lista mikrofonów telefonu (dolny, górny, tylny, USB, BT) z metadanymi `MicrophoneInfo` oraz przełącznik trybu wejścia (`Unprocessed` domyślnie bez DSP producenta, `Generic`, `VoiceRecognition`, `VoiceCommunication`) i profilu A2DP (`Game Low-Latency` / `Media`), stosowane na żywo bez rozłączania słuchawek.
+- **Karta „Specyfikacja sprzętu i standardów” w Ustawieniach**: pełny odczyt SoC, Android/ABI, flag `FEATURE_AUDIO_LOW_LATENCY`/`PRO`/`UNPROCESSED`, wykrytych mikrofonów, wsparcia LE Audio / BLE 2M PHY / Coded PHY, wynegocjowanego kodeka A2DP i formatów HAL oraz przycisk jednoklikowego kopiowania raportu Markdown do schowka.
+- **Rozdzielona telemetria etapów opóźnienia**: osobny podgląd opóźnień bufora wejścia Oboe, kolejki SPSC, DSP, bufora wyjścia Oboe i pełnej pętli Bluetooth.
+
+### Zmieniono
+- Skompensowano filtry korekcji mowy oraz `LoopbackDetector` pod różne natywne częstotliwości próbkowania wejścia i wyjścia (np. 48 kHz mikrofon → 16 kHz HFP lub 44,1 kHz A2DP).
 
 ## [1.0.0] - 2026-11-20
 

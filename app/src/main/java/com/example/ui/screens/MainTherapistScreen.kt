@@ -26,7 +26,9 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SpeakerNotesOff
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -41,6 +43,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -56,6 +59,7 @@ import com.example.ui.components.CompatibilityBadge
 import com.example.ui.components.CompactSafetyStatusBanner
 import com.example.ui.components.LiveAudioLevelMeter
 import com.example.ui.theme.LocalHearLinkColors
+import java.util.Locale
 import kotlin.math.roundToInt
 
 @Composable
@@ -71,6 +75,7 @@ fun MainTherapistScreen(
     onSpeechClarityToggle: (Boolean) -> Unit,
     onRequestMissingPermissions: () -> Unit,
     onOpenSafetyInfo: () -> Unit,
+    onOpenMicSettings: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val semantic = LocalHearLinkColors.current
@@ -133,12 +138,15 @@ fun MainTherapistScreen(
                                     color = statusColor,
                                     modifier = Modifier.testTag("transmission_status_text"),
                                 )
+                                val selectedMicLabel = uiState.microphones
+                                    .firstOrNull { it.deviceId == uiState.dspConfig.selectedMicDeviceId }
+                                    ?.labelPl ?: "Mikrofon automatyczny"
                                 Text(
                                     text = when {
                                         !uiState.safetyState.microphoneGranted -> "Mikrofon: brak uprawnienia"
-                                        isActive && telemetry.sampleRate > 0 ->
-                                            "Mikrofon telefonu: aktywny (${telemetry.sampleRate} Hz)"
-                                        else -> "Mikrofon telefonu: gotowy"
+                                        isActive && telemetry.inputSampleRate > 0 ->
+                                            "$selectedMicLabel (${telemetry.inputSampleRate} Hz → ${telemetry.outputSampleRate} Hz)"
+                                        else -> "$selectedMicLabel · ${uiState.dspConfig.micInputPreset.labelPl.substringBefore(" (")}"
                                     },
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -197,7 +205,7 @@ fun MainTherapistScreen(
                         }
                     }
 
-                    // Device Battery + Speaker Lock Indicators
+                    // Device Battery, Latency Guard + Speaker Lock Indicators
                     Spacer(modifier = Modifier.height(10.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -226,6 +234,35 @@ fun MainTherapistScreen(
                             }
                         }
 
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Speed,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (isActive) {
+                                        "XRun Guard ${telemetry.autoGuardBufferMultiplier}×"
+                                    } else if (uiState.dspConfig.latencyProfile.isUltraLow) {
+                                        "Tryb Ultra-Niski"
+                                    } else {
+                                        "Tryb Zrównoważony"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+
                         route.selectedDevice?.batteryPercent?.let { btBat ->
                             Surface(
                                 shape = MaterialTheme.shapes.small,
@@ -243,7 +280,7 @@ fun MainTherapistScreen(
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "Słuchawki: $btBat%",
+                                        text = "$btBat%",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurface,
                                     )
@@ -282,16 +319,31 @@ fun MainTherapistScreen(
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedButton(
-                        onClick = onOpenDeviceSelector,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .minimumInteractiveComponentSize()
-                            .testTag("select_audio_device_button"),
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Icon(Icons.Default.Headset, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Wybierz urządzenie audio")
+                        OutlinedButton(
+                            onClick = onOpenDeviceSelector,
+                            modifier = Modifier
+                                .weight(1f)
+                                .minimumInteractiveComponentSize()
+                                .testTag("select_audio_device_button"),
+                        ) {
+                            Icon(Icons.Default.Headset, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Słuchawki BT", maxLines = 1)
+                        }
+                        TextButton(
+                            onClick = onOpenMicSettings,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("shortcut_mic_settings_button"),
+                        ) {
+                            Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Mikrofon i HAL")
+                        }
                     }
                 }
             }
@@ -317,23 +369,27 @@ fun MainTherapistScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         LatencyStatPill(
-                            label = "Zmierzone opóźnienie końcowe",
+                            label = "Zmierzone z Bluetooth",
                             value = uiState.loopbackMeasurement.measuredEndToEndMs?.let {
                                 "${it.roundToInt()} ms"
                             } ?: "Niedostępne",
                             subtext = if (uiState.loopbackMeasurement.measuredEndToEndMs != null) {
-                                "Test akustyczny"
+                                "Test akustyczny end-to-end"
                             } else {
                                 "Wymaga testu w Diagnostyce"
                             },
                             modifier = Modifier.weight(1f),
                         )
                         LatencyStatPill(
-                            label = "Opóźnienie potoku aplikacji",
+                            label = "Aplikacja i telefon (cel 10–20 ms)",
                             value = telemetry.estimatedPipelineLatencyMs?.let {
-                                "${it.roundToInt()} ms"
+                                String.format(Locale.US, "%.1f ms", it)
                             } ?: "Nieaktywny",
-                            subtext = "Bufory Oboe (bez radia BT)",
+                            subtext = if (telemetry.isRunning) {
+                                "Guard ${telemetry.autoGuardBufferMultiplier}× · ${telemetry.inputSampleRate}/${telemetry.outputSampleRate} Hz"
+                            } else {
+                                uiState.dspConfig.latencyProfile.labelPl
+                            },
                             modifier = Modifier.weight(1f),
                         )
                     }

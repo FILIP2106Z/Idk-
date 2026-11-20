@@ -261,6 +261,8 @@ class BluetoothRouteManager(
                     profile == BluetoothProfileType.HFP_SCO,
                 batteryPercent = battery,
                 isConnected = true,
+                supportedSampleRates = info.sampleRates?.toList()?.sorted() ?: emptyList(),
+                supportedEncodings = HardwareInspector.mapEncodingNames(info.encodings),
             )
         }.sortedWith(
             compareBy<AudioOutputDevice> { profilePriority(it.profileType) }

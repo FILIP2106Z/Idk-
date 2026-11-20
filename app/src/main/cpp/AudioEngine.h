@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -14,7 +15,15 @@ namespace hearlink {
 
 enum class OutputUsageMode : int32_t {
     Communication = 0, // LE Audio / HFP
-    Media = 1          // A2DP fallback
+    GameLowLatency = 1,// Low-latency A2DP / Media path
+    MediaStandard = 2  // Standard Media path
+};
+
+enum class InputPresetMode : int32_t {
+    Unprocessed = 0,
+    VoiceRecognition = 1,
+    VoiceCommunication = 2,
+    Generic = 3
 };
 
 struct EngineTelemetrySnapshot {
@@ -25,9 +34,11 @@ struct EngineTelemetrySnapshot {
     bool outputIsAAudio = false;
     bool inputIsExclusive = false;
     bool outputIsExclusive = false;
-    int32_t sampleRate = 0;
+    int32_t inputSampleRate = 0;
+    int32_t outputSampleRate = 0;
     int32_t inputFramesPerBurst = 0;
     int32_t outputFramesPerBurst = 0;
+    int32_t inputBufferSizeFrames = 0;
     int32_t outputBufferSizeFrames = 0;
     int32_t ringBufferedFrames = 0;
     int64_t inputXRunCount = 0;
@@ -36,13 +47,16 @@ struct EngineTelemetrySnapshot {
     int64_t ringUnderruns = 0;
     float dspAvgTimeUs = 0.0f;
     float dspMaxTimeUs = 0.0f;
+    float inputBufferLatencyMs = 0.0f;
+    float ringBufferLatencyMs = 0.0f;
+    float outputBufferLatencyMs = 0.0f;
     float estimatedPipelineLatencyMs = -1.0f;
     float inputLevelDbfs = -90.0f;
     float outputLevelDbfs = -90.0f;
     bool limiterActive = false;
     bool streamErrorOccurred = false;
-    int32_t lastInputErrorCode = 0;
-    int32_t lastOutputErrorCode = 0;
+    int32_t autoGuardBufferMultiplier = 1;
+    int32_t autoGuardAdjustments = 0;
 };
 
 class AudioEngine {
@@ -50,7 +64,13 @@ public:
     AudioEngine();
     ~AudioEngine();
 
-    bool start(int32_t inputDeviceId, int32_t outputDeviceId, int32_t usageMode);
+    bool start(
+        int32_t inputDeviceId,
+        int32_t outputDeviceId,
+        int32_t usageMode,
+        int32_t inputPresetMode,
+        bool ultraLowLatencyMode
+    );
     void stop();
     void setOutputMuted(bool muted);
 
@@ -108,9 +128,11 @@ private:
         bool isInput_;
     };
 
-    bool openInputStream(int32_t deviceId);
-    bool openOutputStream(int32_t deviceId, int32_t sampleRate, int32_t usageMode);
+    bool openInputStream(int32_t deviceId, int32_t inputPresetMode);
+    bool openOutputStream(int32_t deviceId, int32_t usageMode);
     void closeStreamsLocked();
+    void evaluateAutoXRunGuardLocked(int64_t totalUnderrunsNow);
+    void readFromRingWithResample(float* out, int32_t numFrames);
 
     std::mutex lifecycleMutex_;
     std::shared_ptr<oboe::AudioStream> inputStream_;
@@ -121,7 +143,6 @@ private:
     std::unique_ptr<StreamErrorHandler> inputErrorCallback_;
     std::unique_ptr<StreamErrorHandler> outputErrorCallback_;
 
-    // 16384 floats (~341 ms at 48 kHz) lock-free SPSC ring buffer
     LockFreeRingBuffer<16384> ringBuffer_;
     DspPipeline dspPipeline_;
     DspAtomicConfig dspConfig_;
@@ -129,13 +150,27 @@ private:
 
     std::atomic<bool> isRunning_{false};
     std::atomic<bool> isMuted_{false};
+    std::atomic<bool> needsStartupSync_{true};
     std::atomic<bool> streamErrorFlag_{false};
-    std::atomic<int32_t> lastInputError_{0};
-    std::atomic<int32_t> lastOutputError_{0};
 
-    int32_t activeSampleRate_ = 48000;
-    int32_t targetJitterFrames_ = 480;
-    int32_t maxJitterFrames_ = 1920;
+    int32_t inputSampleRate_ = 48000;
+    int32_t outputSampleRate_ = 48000;
+    int32_t targetJitterFrames_ = 128;
+    int32_t maxJitterFrames_ = 384;
+    bool ultraLowLatencyMode_ = true;
+
+    // Resampler state (only used inside OutputCallback when inputSampleRate_ != outputSampleRate_)
+    std::array<float, 4096> resamplerScratch_{};
+    double resamplerPhase_ = 0.0;
+    float resamplerPrevSample_ = 0.0f;
+    float resamplerCurrSample_ = 0.0f;
+    bool resamplerPrimed_ = false;
+
+    // Auto-XRun Guard state (checked off-audio-thread in getTelemetry)
+    int32_t bufferMultiplier_ = 1;
+    int32_t autoGuardAdjustments_ = 0;
+    int64_t guardWindowStartMs_ = 0;
+    int64_t guardWindowBaseUnderruns_ = 0;
 
     std::atomic<int64_t> ringOverruns_{0};
     std::atomic<int64_t> ringUnderruns_{0};

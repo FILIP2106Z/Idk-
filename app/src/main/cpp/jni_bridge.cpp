@@ -21,9 +21,17 @@ Java_com_example_audio_NativeAudioBridge_nativeStart(
     jobject,
     jint inputDeviceId,
     jint outputDeviceId,
-    jint usageMode
+    jint usageMode,
+    jint inputPresetMode,
+    jboolean ultraLowLatencyMode
 ) {
-    return getOrCreateEngine()->start(inputDeviceId, outputDeviceId, usageMode) ? JNI_TRUE : JNI_FALSE;
+    return getOrCreateEngine()->start(
+        inputDeviceId,
+        outputDeviceId,
+        usageMode,
+        inputPresetMode,
+        ultraLowLatencyMode == JNI_TRUE
+    ) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
@@ -104,7 +112,7 @@ Java_com_example_audio_NativeAudioBridge_nativePollLoopbackTest(JNIEnv* env, job
 
 JNIEXPORT jfloatArray JNICALL
 Java_com_example_audio_NativeAudioBridge_nativeGetTelemetry(JNIEnv* env, jobject) {
-    constexpr int kFieldCount = 23;
+    constexpr int kFieldCount = 30;
     jfloatArray arr = env->NewFloatArray(kFieldCount);
     if (arr == nullptr) return nullptr;
 
@@ -118,22 +126,29 @@ Java_com_example_audio_NativeAudioBridge_nativeGetTelemetry(JNIEnv* env, jobject
         out[4] = s.outputIsAAudio ? 1.0f : 0.0f;
         out[5] = s.inputIsExclusive ? 1.0f : 0.0f;
         out[6] = s.outputIsExclusive ? 1.0f : 0.0f;
-        out[7] = static_cast<float>(s.sampleRate);
-        out[8] = static_cast<float>(s.inputFramesPerBurst);
-        out[9] = static_cast<float>(s.outputFramesPerBurst);
-        out[10] = static_cast<float>(s.outputBufferSizeFrames);
-        out[11] = static_cast<float>(s.ringBufferedFrames);
-        out[12] = static_cast<float>(s.inputXRunCount);
-        out[13] = static_cast<float>(s.outputXRunCount);
-        out[14] = static_cast<float>(s.ringOverruns);
-        out[15] = static_cast<float>(s.ringUnderruns);
-        out[16] = s.dspAvgTimeUs;
-        out[17] = s.dspMaxTimeUs;
-        out[18] = s.estimatedPipelineLatencyMs;
-        out[19] = s.inputLevelDbfs;
-        out[20] = s.outputLevelDbfs;
-        out[21] = s.limiterActive ? 1.0f : 0.0f;
-        out[22] = s.streamErrorOccurred ? 1.0f : 0.0f;
+        out[7] = static_cast<float>(s.inputSampleRate);
+        out[8] = static_cast<float>(s.outputSampleRate);
+        out[9] = static_cast<float>(s.inputFramesPerBurst);
+        out[10] = static_cast<float>(s.outputFramesPerBurst);
+        out[11] = static_cast<float>(s.inputBufferSizeFrames);
+        out[12] = static_cast<float>(s.outputBufferSizeFrames);
+        out[13] = static_cast<float>(s.ringBufferedFrames);
+        out[14] = static_cast<float>(s.inputXRunCount);
+        out[15] = static_cast<float>(s.outputXRunCount);
+        out[16] = static_cast<float>(s.ringOverruns);
+        out[17] = static_cast<float>(s.ringUnderruns);
+        out[18] = s.dspAvgTimeUs;
+        out[19] = s.dspMaxTimeUs;
+        out[20] = s.inputBufferLatencyMs;
+        out[21] = s.ringBufferLatencyMs;
+        out[22] = s.outputBufferLatencyMs;
+        out[23] = s.estimatedPipelineLatencyMs;
+        out[24] = s.inputLevelDbfs;
+        out[25] = s.outputLevelDbfs;
+        out[26] = s.limiterActive ? 1.0f : 0.0f;
+        out[27] = s.streamErrorOccurred ? 1.0f : 0.0f;
+        out[28] = static_cast<float>(s.autoGuardBufferMultiplier);
+        out[29] = static_cast<float>(s.autoGuardAdjustments);
     }
     env->SetFloatArrayRegion(arr, 0, kFieldCount, out);
     return arr;

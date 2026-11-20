@@ -118,9 +118,11 @@ void DspPipeline::updateFiltersIfNeeded(
     if (clarityEnabled != lastClarityEnabled_ ||
         std::abs(clarityStrength - lastClarityStrength_) > 0.01f) {
         const float strength = std::clamp(clarityStrength, 0.0f, 1.0f);
-        // Subtle 2.4 kHz presence boost (+0 to +5.5 dB) + gentle >6.2 kHz roll-off to avoid bone-conduction buzz
-        presencePeak_.configurePeaking(sampleRate_, 2400.0f, 0.85f, strength * 5.5f);
-        airDeHarshShelf_.configureHighShelf(sampleRate_, 6200.0f, 0.707f, -strength * 2.5f);
+        const float presenceFreq = std::min(2400.0f, sampleRate_ * 0.30f);
+        const float shelfGainDb = (sampleRate_ >= 20000.0f) ? (-strength * 2.5f) : 0.0f;
+        // Subtle presence boost (+0 to +5.5 dB) + gentle >6.2 kHz roll-off on wideband routes
+        presencePeak_.configurePeaking(sampleRate_, presenceFreq, 0.85f, strength * 5.5f);
+        airDeHarshShelf_.configureHighShelf(sampleRate_, 6200.0f, 0.707f, shelfGainDb);
         lastClarityEnabled_ = clarityEnabled;
         lastClarityStrength_ = clarityStrength;
     }

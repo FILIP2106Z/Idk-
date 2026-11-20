@@ -293,6 +293,7 @@ fun HearLinkApp(viewModel: HearLinkViewModel) {
                                 onSpeechClarityToggle = { viewModel.updateSpeechClarity(it) },
                                 onRequestMissingPermissions = requestMissingCritical,
                                 onOpenSafetyInfo = { showFullSafetyDialog = true },
+                                onOpenMicSettings = { navigateToTab(ROUTE_SETTINGS) },
                             )
                         }
                         composable(ROUTE_DIAGNOSTICS) {
@@ -310,6 +311,13 @@ fun HearLinkApp(viewModel: HearLinkViewModel) {
                                 dspConfig = uiState.dspConfig,
                                 themeMode = uiState.themeMode,
                                 safetyState = uiState.safetyState,
+                                microphones = uiState.microphones,
+                                hardwareReport = uiState.hardwareReport,
+                                onSelectMicrophone = { viewModel.selectMicrophone(it) },
+                                onSelectMicInputPreset = { viewModel.selectMicInputPreset(it) },
+                                onSelectLatencyProfile = { viewModel.selectLatencyProfile(it) },
+                                onSelectA2dpUsagePreference = { viewModel.selectA2dpUsagePreference(it) },
+                                onRefreshHardwareReport = { viewModel.refreshHardwareSpecification() },
                                 onUpdateMaxOutputLimit = { viewModel.updateMaxOutputLimit(it) },
                                 onUpdateSoftStartRamp = { viewModel.updateSoftStartRampMs(it) },
                                 onUpdateHighPass = { enabled, cutoff -> viewModel.updateHighPass(enabled, cutoff) },

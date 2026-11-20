@@ -17,9 +17,27 @@ int64_t nowMonotonicNs() {
     ).count();
 }
 
+int64_t nowMonotonicMs() {
+    return nowMonotonicNs() / 1000000LL;
+}
+
 float linearToDbfs(float linear) {
     if (linear <= 1e-5f) return -90.0f;
     return std::clamp(20.0f * std::log10(linear), -90.0f, 0.0f);
+}
+
+oboe::InputPreset mapInputPreset(int32_t presetMode) {
+    switch (static_cast<InputPresetMode>(presetMode)) {
+        case InputPresetMode::Unprocessed:
+            return oboe::InputPreset::Unprocessed;
+        case InputPresetMode::VoiceRecognition:
+            return oboe::InputPreset::VoiceRecognition;
+        case InputPresetMode::VoiceCommunication:
+            return oboe::InputPreset::VoiceCommunication;
+        case InputPresetMode::Generic:
+        default:
+            return oboe::InputPreset::Generic;
+    }
 }
 } // namespace
 
@@ -34,55 +52,77 @@ AudioEngine::~AudioEngine() {
     stop();
 }
 
-bool AudioEngine::start(int32_t inputDeviceId, int32_t outputDeviceId, int32_t usageMode) {
+bool AudioEngine::start(
+    int32_t inputDeviceId,
+    int32_t outputDeviceId,
+    int32_t usageMode,
+    int32_t inputPresetMode,
+    bool ultraLowLatencyMode
+) {
     std::lock_guard<std::mutex> lock(lifecycleMutex_);
     closeStreamsLocked();
 
+    ultraLowLatencyMode_ = ultraLowLatencyMode;
     ringBuffer_.reset();
     ringOverruns_.store(0, std::memory_order_relaxed);
     ringUnderruns_.store(0, std::memory_order_relaxed);
     dspAvgTimeUs_.store(0.0f, std::memory_order_relaxed);
     dspMaxTimeUs_.store(0.0f, std::memory_order_relaxed);
     streamErrorFlag_.store(false, std::memory_order_relaxed);
-    lastInputError_.store(0, std::memory_order_relaxed);
-    lastOutputError_.store(0, std::memory_order_relaxed);
     isMuted_.store(false, std::memory_order_relaxed);
+    needsStartupSync_.store(true, std::memory_order_release);
 
-    if (!openInputStream(inputDeviceId)) {
+    resamplerPhase_ = 0.0;
+    resamplerPrevSample_ = 0.0f;
+    resamplerCurrSample_ = 0.0f;
+    resamplerPrimed_ = false;
+
+    if (!openInputStream(inputDeviceId, inputPresetMode)) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "Failed to open input stream");
         closeStreamsLocked();
         return false;
     }
 
-    activeSampleRate_ = inputStream_->getSampleRate();
-    if (activeSampleRate_ <= 0) {
-        activeSampleRate_ = 48000;
-    }
+    inputSampleRate_ = std::max(8000, inputStream_->getSampleRate());
 
-    if (!openOutputStream(outputDeviceId, activeSampleRate_, usageMode)) {
+    if (!openOutputStream(outputDeviceId, usageMode)) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "Failed to open output stream");
         closeStreamsLocked();
         return false;
     }
 
-    // Tune double-buffered output stream size for lowest stable latency
-    const int32_t outBurst = std::max(64, outputStream_->getFramesPerBurst());
-    const int32_t outCapacity = outputStream_->getBufferCapacityInFrames();
-    const int32_t desiredOutBuffer = std::min(outBurst * 2, std::max(outBurst, outCapacity));
+    outputSampleRate_ = std::max(8000, outputStream_->getSampleRate());
+
+    // Ultra-low latency starts at 1 burst; balanced mode starts at 2 bursts
+    const int32_t outBurst = std::max(48, outputStream_->getFramesPerBurst());
+    const int32_t outCapacity = std::max(outBurst, outputStream_->getBufferCapacityInFrames());
+    bufferMultiplier_ = ultraLowLatencyMode_ ? 1 : 2;
+    autoGuardAdjustments_ = 0;
+    guardWindowStartMs_ = nowMonotonicMs();
+    guardWindowBaseUnderruns_ = 0;
+
+    const int32_t desiredOutBuffer = std::min(outBurst * bufferMultiplier_, outCapacity);
     outputStream_->setBufferSizeInFrames(desiredOutBuffer);
 
-    const int32_t inBurst = std::max(64, inputStream_->getFramesPerBurst());
-    const int32_t baseBurst = std::max(inBurst, outBurst);
+    const int32_t inBurst = std::max(48, inputStream_->getFramesPerBurst());
+    // Set input stream buffer tight as well when HAL permits
+    const int32_t inCap = std::max(inBurst, inputStream_->getBufferCapacityInFrames());
+    inputStream_->setBufferSizeInFrames(std::min(inBurst * (ultraLowLatencyMode_ ? 1 : 2), inCap));
 
-    // Keep ring jitter target ~10 ms (or 2 bursts) and max ceiling ~40 ms (or 5 bursts)
-    targetJitterFrames_ = std::max(baseBurst * 2, (activeSampleRate_ * 10) / 1000);
-    maxJitterFrames_ = std::max(baseBurst * 5, (activeSampleRate_ * 40) / 1000);
+    const int32_t baseBurstIn = std::max(inBurst, (outBurst * inputSampleRate_) / outputSampleRate_);
+    if (ultraLowLatencyMode_) {
+        // Target ~1 burst (~2-4 ms), ceiling ~2 bursts + 64 frames (~6-10 ms)
+        targetJitterFrames_ = baseBurstIn;
+        maxJitterFrames_ = std::max(baseBurstIn * 2 + 64, (inputSampleRate_ * 8) / 1000);
+    } else {
+        targetJitterFrames_ = std::max(baseBurstIn * 2, (inputSampleRate_ * 10) / 1000);
+        maxJitterFrames_ = std::max(baseBurstIn * 4, (inputSampleRate_ * 25) / 1000);
+    }
 
-    dspPipeline_.prepare(static_cast<float>(activeSampleRate_));
+    dspPipeline_.prepare(static_cast<float>(outputSampleRate_));
     dspPipeline_.triggerSoftStart();
-    loopbackDetector_.prepare(activeSampleRate_);
+    loopbackDetector_.prepare(inputSampleRate_, outputSampleRate_);
 
-    // Start input first so initial frames arrive before output drains
     oboe::Result inStart = inputStream_->requestStart();
     if (inStart != oboe::Result::OK) {
         __android_log_print(ANDROID_LOG_ERROR, kTag, "Input requestStart failed: %s", oboe::convertToText(inStart));
@@ -100,12 +140,14 @@ bool AudioEngine::start(int32_t inputDeviceId, int32_t outputDeviceId, int32_t u
     isRunning_.store(true, std::memory_order_release);
     __android_log_print(
         ANDROID_LOG_INFO, kTag,
-        "Started HearLink Oboe Engine: sr=%d, inAPI=%d, outAPI=%d, inBurst=%d, outBurst=%d",
-        activeSampleRate_,
+        "Started HearLink UltraLow=%d inSR=%d outSR=%d inAPI=%d outAPI=%d inEx=%d outEx=%d inBurst=%d outBurst=%d",
+        ultraLowLatencyMode_ ? 1 : 0,
+        inputSampleRate_, outputSampleRate_,
         static_cast<int>(inputStream_->getAudioApi()),
         static_cast<int>(outputStream_->getAudioApi()),
-        inBurst,
-        outBurst
+        inputStream_->getSharingMode() == oboe::SharingMode::Exclusive ? 1 : 0,
+        outputStream_->getSharingMode() == oboe::SharingMode::Exclusive ? 1 : 0,
+        inBurst, outBurst
     );
     return true;
 }
@@ -134,15 +176,16 @@ void AudioEngine::closeStreamsLocked() {
     limiterActive_.store(false, std::memory_order_relaxed);
 }
 
-bool AudioEngine::openInputStream(int32_t deviceId) {
-    auto tryOpen = [&](oboe::SharingMode sharingMode) -> oboe::Result {
+bool AudioEngine::openInputStream(int32_t deviceId, int32_t inputPresetMode) {
+    const oboe::InputPreset preset = mapInputPreset(inputPresetMode);
+    auto tryOpen = [&](oboe::SharingMode sharingMode, oboe::InputPreset chosenPreset) -> oboe::Result {
         oboe::AudioStreamBuilder builder;
         builder.setDirection(oboe::Direction::Input)
             ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
             ->setSharingMode(sharingMode)
             ->setFormat(oboe::AudioFormat::Float)
             ->setChannelCount(oboe::ChannelCount::Mono)
-            ->setInputPreset(oboe::InputPreset::VoiceRecognition)
+            ->setInputPreset(chosenPreset)
             ->setDataCallback(inputCallback_.get())
             ->setErrorCallback(inputErrorCallback_.get());
 
@@ -152,28 +195,43 @@ bool AudioEngine::openInputStream(int32_t deviceId) {
         return builder.openStream(inputStream_);
     };
 
-    oboe::Result result = tryOpen(oboe::SharingMode::Exclusive);
+    // 1. Try Exclusive with requested preset (e.g. Unprocessed)
+    oboe::Result result = tryOpen(oboe::SharingMode::Exclusive, preset);
     if (result != oboe::Result::OK) {
-        result = tryOpen(oboe::SharingMode::Shared);
+        // 2. Try Shared with requested preset
+        result = tryOpen(oboe::SharingMode::Shared, preset);
+    }
+    if (result != oboe::Result::OK && preset != oboe::InputPreset::Generic) {
+        // 3. Fallback to Generic preset if OEM HAL rejects Unprocessed on a specific mic
+        result = tryOpen(oboe::SharingMode::Shared, oboe::InputPreset::Generic);
     }
     return result == oboe::Result::OK && inputStream_ != nullptr;
 }
 
-bool AudioEngine::openOutputStream(int32_t deviceId, int32_t sampleRate, int32_t usageMode) {
-    const oboe::Usage oboeUsage = (usageMode == static_cast<int32_t>(OutputUsageMode::Media))
-        ? oboe::Usage::Media
-        : oboe::Usage::VoiceCommunication;
-    const oboe::ContentType contentType = oboe::ContentType::Speech;
+bool AudioEngine::openOutputStream(int32_t deviceId, int32_t usageMode) {
+    const oboe::Usage oboeUsage = [&]() {
+        switch (static_cast<OutputUsageMode>(usageMode)) {
+            case OutputUsageMode::GameLowLatency:
+                return oboe::Usage::Game;
+            case OutputUsageMode::MediaStandard:
+                return oboe::Usage::Media;
+            case OutputUsageMode::Communication:
+            default:
+                return oboe::Usage::VoiceCommunication;
+        }
+    }();
+    const oboe::ContentType contentType = (oboeUsage == oboe::Usage::Game)
+        ? oboe::ContentType::Sonification
+        : oboe::ContentType::Speech;
 
     auto tryOpen = [&](oboe::SharingMode sharingMode) -> oboe::Result {
         oboe::AudioStreamBuilder builder;
+        // Do NOT force sample rate -> keeps output on native FastMixer/MMAP low-latency path
         builder.setDirection(oboe::Direction::Output)
             ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
             ->setSharingMode(sharingMode)
             ->setFormat(oboe::AudioFormat::Float)
             ->setChannelCount(oboe::ChannelCount::Mono)
-            ->setSampleRate(sampleRate)
-            ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
             ->setUsage(oboeUsage)
             ->setContentType(contentType)
             ->setDataCallback(outputCallback_.get())
@@ -195,6 +253,7 @@ bool AudioEngine::openOutputStream(int32_t deviceId, int32_t sampleRate, int32_t
 void AudioEngine::setOutputMuted(bool muted) {
     const bool prev = isMuted_.exchange(muted, std::memory_order_acq_rel);
     if (prev && !muted) {
+        needsStartupSync_.store(true, std::memory_order_release);
         dspPipeline_.triggerSoftStart();
     }
 }
@@ -239,6 +298,53 @@ void AudioEngine::cancelLoopbackTest() {
 
 LoopbackResult AudioEngine::pollLoopbackTest() {
     return loopbackDetector_.pollAndAnalyze();
+}
+
+void AudioEngine::readFromRingWithResample(float* out, int32_t numFrames) {
+    if (inputSampleRate_ == outputSampleRate_) {
+        const size_t readCount = ringBuffer_.read(out, static_cast<size_t>(numFrames));
+        if (readCount < static_cast<size_t>(numFrames)) {
+            std::memset(out + readCount, 0, (static_cast<size_t>(numFrames) - readCount) * sizeof(float));
+            ringUnderruns_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    // Lock-free linear resampler when mic rate (e.g. 48kHz) differs from BT output rate (e.g. 16kHz HFP / 44.1kHz A2DP)
+    const double step = static_cast<double>(inputSampleRate_) / static_cast<double>(outputSampleRate_);
+    if (!resamplerPrimed_) {
+        float initial[2] = {0.0f, 0.0f};
+        const size_t got = ringBuffer_.read(initial, 2);
+        if (got == 0) {
+            std::memset(out, 0, static_cast<size_t>(numFrames) * sizeof(float));
+            ringUnderruns_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        resamplerPrevSample_ = initial[0];
+        resamplerCurrSample_ = (got > 1) ? initial[1] : initial[0];
+        resamplerPhase_ = 0.0;
+        resamplerPrimed_ = true;
+    }
+
+    bool underrunFlag = false;
+    for (int32_t i = 0; i < numFrames; ++i) {
+        while (resamplerPhase_ >= 1.0) {
+            resamplerPhase_ -= 1.0;
+            resamplerPrevSample_ = resamplerCurrSample_;
+            float nextSample = 0.0f;
+            if (ringBuffer_.read(&nextSample, 1) == 0) {
+                nextSample = 0.0f;
+                underrunFlag = true;
+            }
+            resamplerCurrSample_ = nextSample;
+        }
+        const float frac = static_cast<float>(resamplerPhase_);
+        out[i] = resamplerPrevSample_ + frac * (resamplerCurrSample_ - resamplerPrevSample_);
+        resamplerPhase_ += step;
+    }
+    if (underrunFlag) {
+        ringUnderruns_.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 oboe::DataCallbackResult AudioEngine::InputCallback::onAudioReady(
@@ -286,25 +392,33 @@ oboe::DataCallbackResult AudioEngine::OutputCallback::onAudioReady(
         return oboe::DataCallbackResult::Continue;
     }
 
-    // Adaptive drift control: keep queue bounded to prevent creeping latency
+    const size_t neededInFrames = static_cast<size_t>(
+        std::ceil(static_cast<double>(numFrames) * engine_.inputSampleRate_ / engine_.outputSampleRate_)
+    );
+
+    // Zero-Lag startup sync: drop accumulated pre-output frames on first callback
+    if (engine_.needsStartupSync_.exchange(false, std::memory_order_acq_rel)) {
+        const size_t avail = engine_.ringBuffer_.availableToRead();
+        const size_t desiredStart = neededInFrames + static_cast<size_t>(engine_.targetJitterFrames_);
+        if (avail > desiredStart) {
+            engine_.ringBuffer_.dropOldest(avail - desiredStart);
+        }
+    }
+
+    // Strict drift control to keep ring queue within 1-2 bursts
     const size_t available = engine_.ringBuffer_.availableToRead();
-    if (available > static_cast<size_t>(engine_.maxJitterFrames_ + numFrames)) {
-        const size_t drop = available - static_cast<size_t>(engine_.targetJitterFrames_ + numFrames);
+    if (available > static_cast<size_t>(engine_.maxJitterFrames_) + neededInFrames) {
+        const size_t drop = available - (static_cast<size_t>(engine_.targetJitterFrames_) + neededInFrames);
         engine_.ringBuffer_.dropOldest(drop);
     }
 
-    const size_t readCount = engine_.ringBuffer_.read(out, static_cast<size_t>(numFrames));
-    if (readCount < static_cast<size_t>(numFrames)) {
-        std::memset(out + readCount, 0, (static_cast<size_t>(numFrames) - readCount) * sizeof(float));
-        engine_.ringUnderruns_.fetch_add(1, std::memory_order_relaxed);
-    }
+    engine_.readFromRingWithResample(out, numFrames);
 
     const DspMetrics metrics = engine_.dspPipeline_.processBlock(out, numFrames, engine_.dspConfig_);
 
     const int64_t endNs = nowMonotonicNs();
     const float elapsedUs = static_cast<float>(endNs - startNs) / 1000.0f;
 
-    // Exponential moving average for DSP execution time
     const float prevAvg = engine_.dspAvgTimeUs_.load(std::memory_order_relaxed);
     const float newAvg = (prevAvg <= 0.01f) ? elapsedUs : (0.9f * prevAvg + 0.1f * elapsedUs);
     engine_.dspAvgTimeUs_.store(newAvg, std::memory_order_relaxed);
@@ -328,12 +442,38 @@ void AudioEngine::StreamErrorHandler::onErrorAfterClose(oboe::AudioStream*, oboe
         isInput_ ? "Input" : "Output",
         oboe::convertToText(error)
     );
-    if (isInput_) {
-        engine_.lastInputError_.store(static_cast<int32_t>(error), std::memory_order_relaxed);
-    } else {
-        engine_.lastOutputError_.store(static_cast<int32_t>(error), std::memory_order_relaxed);
-    }
     engine_.streamErrorFlag_.store(true, std::memory_order_release);
+}
+
+void AudioEngine::evaluateAutoXRunGuardLocked(int64_t totalUnderrunsNow) {
+    if (!ultraLowLatencyMode_ || !outputStream_ || !isRunning_.load(std::memory_order_acquire)) {
+        return;
+    }
+    const int64_t nowMs = nowMonotonicMs();
+    if (nowMs - guardWindowStartMs_ >= 2000) {
+        const int64_t delta = totalUnderrunsNow - guardWindowBaseUnderruns_;
+        if (delta >= 3 && bufferMultiplier_ < 4) {
+            bufferMultiplier_++;
+            autoGuardAdjustments_++;
+            const int32_t outBurst = std::max(48, outputStream_->getFramesPerBurst());
+            const int32_t outCap = std::max(outBurst, outputStream_->getBufferCapacityInFrames());
+            const int32_t newSize = std::min(outBurst * bufferMultiplier_, outCap);
+            outputStream_->setBufferSizeInFrames(newSize);
+
+            const int32_t inBurst = inputStream_ ? std::max(48, inputStream_->getFramesPerBurst()) : outBurst;
+            const int32_t stepIn = std::max(inBurst, (outBurst * inputSampleRate_) / outputSampleRate_);
+            targetJitterFrames_ += stepIn / 2;
+            maxJitterFrames_ += stepIn;
+
+            __android_log_print(
+                ANDROID_LOG_INFO, kTag,
+                "Auto-XRun Guard stepped buffer to %dx (%d frames) after %lld underruns",
+                bufferMultiplier_, newSize, static_cast<long long>(delta)
+            );
+        }
+        guardWindowStartMs_ = nowMs;
+        guardWindowBaseUnderruns_ = totalUnderrunsNow;
+    }
 }
 
 EngineTelemetrySnapshot AudioEngine::getTelemetry() {
@@ -347,8 +487,6 @@ EngineTelemetrySnapshot AudioEngine::getTelemetry() {
     snap.outputLevelDbfs = linearToDbfs(outputLevelLinear_.load(std::memory_order_relaxed));
     snap.limiterActive = limiterActive_.load(std::memory_order_relaxed);
     snap.streamErrorOccurred = streamErrorFlag_.load(std::memory_order_acquire);
-    snap.lastInputErrorCode = lastInputError_.load(std::memory_order_relaxed);
-    snap.lastOutputErrorCode = lastOutputError_.load(std::memory_order_relaxed);
     snap.ringBufferedFrames = static_cast<int32_t>(ringBuffer_.availableToRead());
 
     std::lock_guard<std::mutex> lock(lifecycleMutex_);
@@ -357,8 +495,9 @@ EngineTelemetrySnapshot AudioEngine::getTelemetry() {
                                 inputStream_->getState() == oboe::StreamState::Starting);
         snap.inputIsAAudio = (inputStream_->getAudioApi() == oboe::AudioApi::AAudio);
         snap.inputIsExclusive = (inputStream_->getSharingMode() == oboe::SharingMode::Exclusive);
-        snap.sampleRate = inputStream_->getSampleRate();
+        snap.inputSampleRate = inputStream_->getSampleRate();
         snap.inputFramesPerBurst = inputStream_->getFramesPerBurst();
+        snap.inputBufferSizeFrames = inputStream_->getBufferSizeInFrames();
         auto xruns = inputStream_->getXRunCount();
         snap.inputXRunCount = xruns ? xruns.value() : 0;
     }
@@ -367,16 +506,29 @@ EngineTelemetrySnapshot AudioEngine::getTelemetry() {
                                  outputStream_->getState() == oboe::StreamState::Starting);
         snap.outputIsAAudio = (outputStream_->getAudioApi() == oboe::AudioApi::AAudio);
         snap.outputIsExclusive = (outputStream_->getSharingMode() == oboe::SharingMode::Exclusive);
+        snap.outputSampleRate = outputStream_->getSampleRate();
         snap.outputFramesPerBurst = outputStream_->getFramesPerBurst();
         snap.outputBufferSizeFrames = outputStream_->getBufferSizeInFrames();
         auto xruns = outputStream_->getXRunCount();
         snap.outputXRunCount = xruns ? xruns.value() : 0;
     }
 
-    if (snap.sampleRate > 0 && snap.isRunning) {
-        // Software/audio-hal buffer latency ONLY (explicitly excluding unknown Bluetooth radio codec latency)
-        const int32_t totalPipelineFrames = snap.inputFramesPerBurst + snap.outputBufferSizeFrames + snap.ringBufferedFrames;
-        snap.estimatedPipelineLatencyMs = (static_cast<float>(totalPipelineFrames) * 1000.0f) / static_cast<float>(snap.sampleRate);
+    evaluateAutoXRunGuardLocked(snap.ringUnderruns + snap.outputXRunCount);
+    snap.autoGuardBufferMultiplier = bufferMultiplier_;
+    snap.autoGuardAdjustments = autoGuardAdjustments_;
+
+    if (snap.isRunning && snap.inputSampleRate > 0 && snap.outputSampleRate > 0) {
+        const int32_t effInFrames = (snap.inputBufferSizeFrames > 0)
+            ? std::min(snap.inputBufferSizeFrames, snap.inputFramesPerBurst * 2)
+            : snap.inputFramesPerBurst;
+        snap.inputBufferLatencyMs = (static_cast<float>(effInFrames) * 1000.0f) / static_cast<float>(snap.inputSampleRate);
+        snap.ringBufferLatencyMs = (static_cast<float>(snap.ringBufferedFrames) * 1000.0f) / static_cast<float>(snap.inputSampleRate);
+        snap.outputBufferLatencyMs = (static_cast<float>(snap.outputBufferSizeFrames) * 1000.0f) / static_cast<float>(snap.outputSampleRate);
+        snap.estimatedPipelineLatencyMs =
+            snap.inputBufferLatencyMs +
+            snap.ringBufferLatencyMs +
+            snap.outputBufferLatencyMs +
+            (snap.dspAvgTimeUs / 1000.0f);
     }
 
     return snap;
