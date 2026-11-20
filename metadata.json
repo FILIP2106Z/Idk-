@@ -1,0 +1,6 @@
+{
+  "name": "HearLink",
+  "description": "Niskoopóźnieniowy system wspomagania słyszenia dla terapii z transmisją Bluetooth na słuchawki kostne.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">HearLink</string>
+    <string name="notification_channel_name">Transmisja dźwięku HearLink</string>
+    <string name="notification_channel_desc">Powiadomienie o aktywnej transmisji mowy na żywo do słuchawek pacjenta</string>
+    <string name="notification_title_active">HearLink — Transmisja aktywna</string>
+    <string name="notification_title_reconnecting">HearLink — Oczekiwanie na słuchawki</string>
+    <string name="notification_body_active">Mikrofon lokalny → %1$s</string>
+    <string name="notification_body_reconnecting">Połączenie Bluetooth przerwane. Głośnik telefonu jest zablokowany.</string>
+    <string name="notification_action_stop">ZATRZYMAJ</string>
+</resources>
