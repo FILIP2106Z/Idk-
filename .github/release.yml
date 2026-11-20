@@ -1,0 +1,33 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot
+  categories:
+    - title: "🚀 Nowe funkcje"
+      labels:
+        - feature
+        - enhancement
+    - title: "🎧 Audio, Bluetooth i DSP"
+      labels:
+        - audio
+        - dsp
+        - bluetooth
+    - title: "🛡️ Bezpieczeństwo i interfejs"
+      labels:
+        - safety
+        - ui
+        - accessibility
+    - title: "🐛 Poprawki błędów"
+      labels:
+        - bug
+        - fix
+    - title: "🔧 Utrzymanie i CI/CD"
+      labels:
+        - ci
+        - chore
+        - dependencies
+    - title: "📦 Pozostałe zmiany"
+      labels:
+        - "*"

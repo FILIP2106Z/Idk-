@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.hearlink.vqmtxp"
     minSdk = 29
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = (project.findProperty("versionCode") as? String)?.toIntOrNull() ?: 10000
+    versionName = (project.findProperty("versionName") as? String)?.takeIf { it.isNotBlank() } ?: "1.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -1,0 +1,94 @@
+name: Android CI (Tests & APKs)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Testy jednostkowe oraz kompilacja Debug i Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pobierz kod źródłowy
+        uses: actions/checkout@v7
+
+      - name: Konfiguracja JDK 21 (Temurin)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Akceptacja licencji Android SDK
+        run: |
+          SDK_MANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager | head -n 1)
+          if [ -n "$SDK_MANAGER" ]; then
+            yes | "$SDK_MANAGER" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Konfiguracja Gradle 9.3.1 i pamięci podręcznej
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Przygotuj klucze podpisywania (Debug + Release)
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          base64 -d debug.keystore.base64 > debug.keystore
+
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            echo "STORE_PASSWORD=$RELEASE_STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$RELEASE_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "RELEASE_SIGNING_MODE=production" >> "$GITHUB_ENV"
+          else
+            echo "Brak sekretów RELEASE_KEYSTORE_BASE64 — generuję tymczasowy klucz CI dla weryfikacji kompilacji Release."
+            keytool -genkeypair -v \
+              -keystore my-upload-key.jks \
+              -alias upload \
+              -keyalg RSA -keysize 2048 -validity 365 \
+              -storepass ci_temp_store_pass \
+              -keypass ci_temp_store_pass \
+              -dname "CN=HearLink CI, OU=Mobile, O=HearLink, L=Warsaw, ST=Mazovia, C=PL"
+            echo "STORE_PASSWORD=ci_temp_store_pass" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=ci_temp_store_pass" >> "$GITHUB_ENV"
+            echo "RELEASE_SIGNING_MODE=ephemeral_ci" >> "$GITHUB_ENV"
+          fi
+
+      - name: Uruchom testy jednostkowe i Robolectric
+        run: gradle :app:testDebugUnitTest --no-daemon
+
+      - name: Zbuduj Debug i Release APK
+        run: gradle :app:assembleDebug :app:assembleRelease --no-daemon
+
+      - name: Przygotuj artefakty APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/HearLink-ci-debug.apk
+          cp app/build/outputs/apk/release/app-release.apk dist/HearLink-ci-release.apk
+          (cd dist && sha256sum *.apk > checksums.sha256)
+
+      - name: Wyślij artefakty APK (Debug + Release)
+        uses: actions/upload-artifact@v7
+        with:
+          name: hearlink-ci-apks-${{ github.run_number }}
+          path: dist/*
+          retention-days: 14
+
+      - name: Wyślij raport testów w razie błędu
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hearlink-test-report-${{ github.run_number }}
+          path: app/build/reports/tests/testDebugUnitTest/
+          retention-days: 7

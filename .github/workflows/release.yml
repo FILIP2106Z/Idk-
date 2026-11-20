@@ -1,0 +1,193 @@
+name: Release HearLink (Debug & Release APKs)
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Wersja wydania SemVer (np. 1.0.0 lub 1.1.0, bez lub z prefiksem v)"
+        required: true
+        default: "1.0.0"
+        type: string
+      prerelease:
+        description: "Oznacz jako wydanie testowe (Pre-release)"
+        required: false
+        default: false
+        type: boolean
+      release_notes:
+        description: "Dodatkowy opis wydania (opcjonalny)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Kompilacja wydania i publikacja APK w GitHub Releases
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pobierz kod źródłowy z pełną historią
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Wyznacz numer wersji (SemVer → versionName i versionCode)
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW_VER="${{ inputs.version }}"
+          else
+            RAW_VER="${GITHUB_REF#refs/tags/}"
+          fi
+
+          VERSION_NAME="${RAW_VER#v}"
+          if [[ ! "$VERSION_NAME" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Błąd: wersja '$VERSION_NAME' nie jest poprawnym formatem SemVer (oczekiwano np. 1.0.0)."
+            exit 1
+          fi
+
+          MAJOR="${BASH_REMATCH[1]}"
+          MINOR="${BASH_REMATCH[2]}"
+          PATCH="${BASH_REMATCH[3]}"
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          TAG_NAME="v${VERSION_NAME}"
+
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Wyznaczono wydanie: ${TAG_NAME} (versionCode=${VERSION_CODE})"
+
+      - name: Konfiguracja JDK 21 (Temurin)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Akceptacja licencji Android SDK
+        run: |
+          SDK_MANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager | head -n 1)
+          if [ -n "$SDK_MANAGER" ]; then
+            yes | "$SDK_MANAGER" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Konfiguracja Gradle 9.3.1 i pamięci podręcznej
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Przygotuj klucze podpisywania (Debug + Release)
+        id: signing
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          base64 -d debug.keystore.base64 > debug.keystore
+
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            echo "STORE_PASSWORD=$RELEASE_STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$RELEASE_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "signing_note=Podpisano produkcyjnym kluczem wydania z sekretów repozytorium." >> "$GITHUB_OUTPUT"
+          else
+            keytool -genkeypair -v \
+              -keystore my-upload-key.jks \
+              -alias upload \
+              -keyalg RSA -keysize 2048 -validity 365 \
+              -storepass ci_temp_store_pass \
+              -keypass ci_temp_store_pass \
+              -dname "CN=HearLink CI, OU=Mobile, O=HearLink, L=Warsaw, ST=Mazovia, C=PL"
+            echo "STORE_PASSWORD=ci_temp_store_pass" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=ci_temp_store_pass" >> "$GITHUB_ENV"
+            echo "signing_note=Podpisano tymczasowym kluczem CI (skonfiguruj RELEASE_KEYSTORE_BASE64 w Secrets dla podpisu produkcyjnego)." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Uruchom testy przed wydaniem
+        run: |
+          gradle :app:testDebugUnitTest \
+            -PversionCode=${{ steps.version.outputs.version_code }} \
+            -PversionName=${{ steps.version.outputs.version_name }} \
+            --no-daemon
+
+      - name: Kompiluj Debug APK oraz Release APK
+        run: |
+          gradle :app:assembleDebug :app:assembleRelease \
+            -PversionCode=${{ steps.version.outputs.version_code }} \
+            -PversionName=${{ steps.version.outputs.version_name }} \
+            --no-daemon
+
+      - name: Przygotuj zasoby wydania (APK + SHA-256)
+        run: |
+          VER="${{ steps.version.outputs.version_name }}"
+          mkdir -p release-assets
+          cp app/build/outputs/apk/debug/app-debug.apk "release-assets/HearLink-v${VER}-debug.apk"
+          cp app/build/outputs/apk/release/app-release.apk "release-assets/HearLink-v${VER}-release.apk"
+          (cd release-assets && sha256sum *.apk > "HearLink-v${VER}-checksums.sha256")
+          ls -lh release-assets
+
+      - name: Zbuduj opis wydania z CHANGELOG.md
+        id: notes
+        env:
+          CUSTOM_NOTES: ${{ inputs.release_notes }}
+        run: |
+          VER="${{ steps.version.outputs.version_name }}"
+          VCODE="${{ steps.version.outputs.version_code }}"
+          SIGN_NOTE="${{ steps.signing.outputs.signing_note }}"
+
+          {
+            echo "## HearLink v${VER} (\`versionCode: ${VCODE}\`)"
+            echo ""
+            if [ -n "$CUSTOM_NOTES" ]; then
+              echo "$CUSTOM_NOTES"
+              echo ""
+            fi
+            if [ -f CHANGELOG.md ]; then
+              SECTION=$(awk -v ver="$VER" '
+                $0 ~ "^## \\[" ver "\\]" { in_sec=1; next }
+                /^## \[/ && in_sec { exit }
+                in_sec { print }
+              ' CHANGELOG.md)
+              if [ -n "$SECTION" ]; then
+                echo "$SECTION"
+                echo ""
+              fi
+            fi
+            echo "### Zasoby wydania (APK)"
+            echo "- \`HearLink-v${VER}-release.apk\` — wersja produkcyjna (Release)"
+            echo "- \`HearLink-v${VER}-debug.apk\` — wersja testowa (Debug)"
+            echo "- \`HearLink-v${VER}-checksums.sha256\` — sumy kontrolne SHA-256"
+            echo ""
+            echo "> **Status podpisu Release APK:** ${SIGN_NOTE}"
+          } > release_notes.md
+
+      - name: Wyślij artefakty kopii zapasowej w Actions
+        uses: actions/upload-artifact@v7
+        with:
+          name: hearlink-v${{ steps.version.outputs.version_name }}-apks
+          path: release-assets/*
+          retention-days: 30
+
+      - name: Opublikuj GitHub Release i załącz pliki APK
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
+          name: "HearLink ${{ steps.version.outputs.tag_name }}"
+          body_path: release_notes.md
+          generate_release_notes: true
+          prerelease: ${{ inputs.prerelease == true || contains(steps.version.outputs.version_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/HearLink-v${{ steps.version.outputs.version_name }}-release.apk
+            release-assets/HearLink-v${{ steps.version.outputs.version_name }}-debug.apk
+            release-assets/HearLink-v${{ steps.version.outputs.version_name }}-checksums.sha256
